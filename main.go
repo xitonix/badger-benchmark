@@ -54,7 +54,9 @@ func main() {
 	fmt.Printf("  Parallel: %d\n", *parallel)
 	fmt.Printf("     Count: %d\n", *count)
 	fmt.Printf("Batch Size: %d\n", *batchSize)
-	fmt.Printf("  Duration: %s\n", now.Sub(start))
+	duration := now.Sub(start)
+	fmt.Printf("  Duration: %v\n", duration)
+	fmt.Printf(" Writes /s: %v\n", int(float64(*count)/duration.Seconds()))
 }
 
 func consume(wg *sync.WaitGroup, p *producer, batchSize int, db *badger.DB) {

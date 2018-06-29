@@ -2,13 +2,17 @@ package main
 
 import (
 	"math/rand"
+	"strconv"
+	"sync"
 )
 
 type producer struct {
 	count, keySize, valueSize int
 	pipe                      chan *entry
-	input                     []*entry
 	value                     []byte
+	key                       []byte
+	wg                        sync.WaitGroup
+	cancelled                 bool
 }
 
 func newProducer(count, keySize, valueSize, parallel int) *producer {
@@ -17,11 +21,12 @@ func newProducer(count, keySize, valueSize, parallel int) *producer {
 		keySize:   keySize,
 		valueSize: valueSize,
 		pipe:      make(chan *entry, parallel),
-		input:     make([]*entry, count),
 	}
 
 	p.value = make([]byte, valueSize)
+	p.key = make([]byte, keySize)
 	rand.Read(p.value)
+	rand.Read(p.key)
 	return p
 }
 
@@ -29,36 +34,23 @@ func (p *producer) output() <-chan *entry {
 	return p.pipe
 }
 
-func (p *producer) len() int {
-	return len(p.input)
-}
-
 func (p *producer) stop() {
-
+	p.cancelled = true
+	p.wg.Wait()
 }
 
 func (p *producer) start() {
-	defer close(p.pipe)
-	for _, e := range p.input {
-		p.pipe <- e
-	}
-}
+	p.wg.Add(1)
+	go func() {
+		defer close(p.pipe)
+		for i := 0; i < p.count; i++ {
+			if p.cancelled {
+				break
+			}
 
-func (p *producer) generateAll() {
-	m := make(map[string]struct{})
-	for i := 0; i < p.count; {
-		e := p.generate(p.keySize, p.valueSize)
-		if _, ok := m[string(e.key)]; !ok {
-			p.input[i] = e
-			m[string(e.key)] = struct{}{}
-			i++
+			k := make([]byte, p.keySize)
+			copy(k, []byte(strconv.Itoa(i)))
+			p.pipe <- &entry{key: k, value: p.value}
 		}
-		continue
-	}
-}
-
-func (p *producer) generate(keySize, valueSize int) *entry {
-	key := make([]byte, keySize)
-	rand.Read(key)
-	return &entry{key: key, value: p.value}
+	}()
 }

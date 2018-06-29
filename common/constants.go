@@ -1,6 +1,6 @@
 package common
 
 const (
-	DataDir = "../data"
-	LogDir  = "../logs"
+	DataDir = "/tmp/badger/data"
+	LogDir  = "/tmp/badger/logs"
 )

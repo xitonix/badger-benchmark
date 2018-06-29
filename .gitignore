@@ -13,3 +13,7 @@
 .idea/
 data/
 logs/
+/writer/writer
+/writer/*.csv
+/reader/reader
+/reader/*.csv

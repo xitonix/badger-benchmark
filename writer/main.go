@@ -24,12 +24,14 @@ func main() {
 	parallel := pflag.Int("parallel", 1, "Number of go routines for writing data concurrently")
 	keySize := pflag.Int("key-size", 16, "Key size in bytes")
 	valueSize := pflag.Int("value-size", 1024, "Value size in bytes")
+	compactors := pflag.Int("compactors", 3, "Number of concurrent compactors")
 	count := pflag.Int("count", 1000000, "Number of documents to write")
 	reportEvery := pflag.Int("report-every", 100000, "Defines how often to print report")
 	batchSize := pflag.Int("batch-size", 1000, "The size of the batch to write data into the disk")
 	syncWrite := pflag.Bool("sync-write", false, "Sync all writes to disk")
 	fileIO := pflag.Bool("file-io", false, "Indicates that the database tables and logs must be loaded using standard I/O instead of memory map")
 	clean := pflag.Bool("clean", false, "Removes data files and the logs before write")
+	readBeforeWrite := pflag.Bool("read-before-write", false, "Checks if a key exists before writing")
 
 	pflag.Parse()
 
@@ -50,21 +52,19 @@ func main() {
 		opts.TableLoadingMode = options.MemoryMap
 	}
 
+	var cancelled bool
 	opts.Dir = common.DataDir
 	opts.ValueDir = common.LogDir
+	opts.NumCompactors = *compactors
+	fmt.Println("Openning the database")
 	db, err := badger.Open(opts)
 	if err != nil {
 		log.Fatal(err)
 	}
+	fmt.Println("The database has been openned")
 
 	cnx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
-	go func() {
-		proc.WaitForTermination()
-		fmt.Println("Stopping the writer...")
-		cancel()
-	}()
 
 	defer func() {
 		fmt.Println("Closing the database...")
@@ -75,17 +75,30 @@ func main() {
 	}()
 
 	producer := newProducer(*count, *keySize, *valueSize, *parallel)
-	fmt.Printf("Preparing %v documents...\n", *count)
-	producer.generateAll()
-	fmt.Printf("Writing %d unique keys into the database\n", producer.len())
+
+	go func() {
+		proc.WaitForTermination()
+		producer.stop()
+		cancelled = true
+		cancel()
+	}()
+
 	wg := sync.WaitGroup{}
+
+	report, err := common.NewCSVWriter("write_report.csv")
+	if err != nil {
+		log.Fatal("CSV ERR:", err)
+	}
+
+	report.AddHeaders("KEY SIZE", "VALUE SIZE", "BATCH SIZE", "PARALLEL", "FILE I/O", "SYNC", "READ BEFORE WRITE", "COMPACTORS", "WRITTEN", "WRITE/sec")
 
 	for i := 0; i < *parallel; i++ {
 		wg.Add(1)
-		go consume(cnx, &wg, producer, *batchSize, db, *syncWrite, every)
+		go consume(cnx, &wg, producer, *batchSize, db, *syncWrite, every, *readBeforeWrite)
 	}
 	start := time.Now()
-	producer.start(cnx)
+	fmt.Printf("Writing %d unique keys into the database\n", *count)
+	producer.start()
 	wg.Wait()
 	duration := time.Now().Sub(start)
 	fmt.Println("\nSUMMARY")
@@ -93,13 +106,22 @@ func main() {
 	fmt.Printf("  Key Size: %d Bytes\n", *keySize)
 	fmt.Printf("Value Size: %d Bytes\n", *valueSize)
 	fmt.Printf("  Parallel: %d\n", *parallel)
-	fmt.Printf("     Count: %d\n", *count)
+	fmt.Printf("  File I/O: %v\n", common.B2S(*fileIO))
 	fmt.Printf("Batch Size: %d\n", *batchSize)
+	fmt.Printf("Compactors: %d\n", *compactors)
+	fmt.Printf("Read First: %v\n", common.B2S(*readBeforeWrite))
+	fmt.Printf("Sync Write: %v\n\n", common.B2S(*syncWrite))
+	fmt.Printf("     Count: %d\n", *count)
 	fmt.Printf("  Duration: %v\n", duration)
-	fmt.Printf(" Writes/s: %v\n\n", int(float64(*count)/duration.Seconds()))
+	rate := int(float64(*count) / duration.Seconds())
+	fmt.Printf(" Writes/s: %v\n\n", rate)
+
+	if !cancelled {
+		report.Write(duration, *keySize, *valueSize, *batchSize, *parallel, common.B2S(*fileIO), common.B2S(*syncWrite), common.B2S(*readBeforeWrite), *compactors, *count, rate)
+	}
 }
 
-func consume(cnx context.Context, wg *sync.WaitGroup, p *producer, batchSize int, db *badger.DB, syncWrite bool, reportEvery int) {
+func consume(cnx context.Context, wg *sync.WaitGroup, p *producer, batchSize int, db *badger.DB, syncWrite bool, reportEvery int, readBeforeWrite bool) {
 	defer wg.Done()
 	counter := 0
 	txn := db.NewTransaction(true)
@@ -128,6 +150,17 @@ func consume(cnx context.Context, wg *sync.WaitGroup, p *producer, batchSize int
 					fmt.Printf("Err05: %s\n", err)
 				}
 				return
+			}
+
+			if readBeforeWrite {
+				item, err := txn.Get(doc.key)
+				if err != nil && err != badger.ErrKeyNotFound {
+					fmt.Printf("READ ERR: %s\n", err)
+					continue
+				}
+				if item != nil {
+					fmt.Println("Duplicate key detected. Overwriting!")
+				}
 			}
 
 			err := txn.Set(doc.key, doc.value)
@@ -161,7 +194,7 @@ func consume(cnx context.Context, wg *sync.WaitGroup, p *producer, batchSize int
 				txn = db.NewTransaction(true)
 			}
 
-			if reportCounter >= reportEvery {
+			if reportEvery > 0 && reportCounter >= reportEvery {
 				fmt.Printf("It took %s to insert %d records\n", time.Since(reportTime), reportCounter)
 				reportCounter = 0
 				reportTime = time.Now()

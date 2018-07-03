@@ -14,8 +14,9 @@ type CSVWriter struct {
 
 func NewCSVWriter(filePath string) (*CSVWriter, error) {
 	w := &CSVWriter{}
-	if _, err := os.Stat(filePath); err != nil {
-		if os.IsNotExist(err) {
+	i, err := os.Stat(filePath)
+	if err != nil || i.Size() == 0 {
+		if os.IsNotExist(err) || i.Size() == 0 {
 			w.file, err = os.Create(filePath)
 			if err != nil {
 				return nil, err

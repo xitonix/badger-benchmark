@@ -7,3 +7,7 @@ func B2S(val bool) string {
 	}
 	return "NO"
 }
+
+func GetDirs(base string) (string, string) {
+	return base + "/data", base + "/logs"
+}
